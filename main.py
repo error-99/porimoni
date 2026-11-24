@@ -26,7 +26,7 @@ from aiogram.types import (
 from fastapi import FastAPI, HTTPException, Request
 
 # ============ CREDENTIALS & CONFIG ============
-BOT_TOKEN    = os.getenv("BOT_TOKEN", "8529860367:AAHJf08a27HjKLyCm4oVDD9InqLADXPTTVo")
+BOT_TOKEN    = os.getenv("BOT_TOKEN", "8529860367:AAHJf04oVDD9InqLADXPTTVo")
 API_URL      = os.getenv("API_URL", "https://shabbir.serv00.net/sex/vid65/api/user_tasks.php")
 API_KEY      = os.getenv("API_KEY", "PUT_A_LONG_RANDOM_SECRET")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "fuclcrobot")
