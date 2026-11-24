@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramFor
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
+    ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -25,7 +26,7 @@ from aiogram.types import (
 from fastapi import FastAPI, HTTPException, Request
 
 # ============ CREDENTIALS & CONFIG ============
-BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN    = os.getenv("BOT_TOKEN", "8529860367:AAHJf08a27HjKLyCm4oVDD9InqLADXPTTVo")
 API_URL      = os.getenv("API_URL", "https://shabbir.serv00.net/sex/vid65/api/user_tasks.php")
 API_KEY      = os.getenv("API_KEY", "PUT_A_LONG_RANDOM_SECRET")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "fuclcrobot")
@@ -37,7 +38,7 @@ WEBHOOK_BASE   = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 WEBHOOK_PATH   = f"/webhook/{BOT_TOKEN.split(':')[0]}"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "wh_sec_982374982374")
 PORT           = int(os.getenv("PORT", "10000"))
-PING_INTERVAL  = int(os.getenv("PING_INTERVAL", "600"))  # 600s = 10 minutes
+PING_INTERVAL  = int(os.getenv("PING_INTERVAL", "600"))
 # ==============================================
 
 GET_BTN = "🎬 Get Video"
@@ -50,6 +51,26 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 http: httpx.AsyncClient | None = None
+prompted_groups: set[int] = set()
+
+
+def get_video_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=GET_BTN)]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder=f"Tap {GET_BTN}",
+    )
+
+
+def inbox_link(payload: str = "video") -> str:
+    return f"https://t.me/{BOT_USERNAME}?start={payload}"
+
+
+def inbox_kb(payload: str = "video") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📥 Open Inbox", url=inbox_link(payload))]]
+    )
 
 
 async def api(action: str, **data) -> dict:
@@ -73,8 +94,15 @@ def watch_link(token: str) -> str:
     return f"https://t.me/{BOT_USERNAME}/{APP_SHORT}?startapp={token}"
 
 
-async def deliver(uid: int, name: str, chat_id: int, chat_type: str, video_id: int | None = None, reply_to: int | None = None):
-    params = {"uid": uid, "chat_type": chat_type, "chat_id": chat_id}
+async def deliver_to_inbox(
+    uid: int,
+    name: str,
+    video_id: int | None = None,
+    source_chat_type: str = "private",
+    source_chat_id: int | None = None,
+) -> tuple[bool, str]:
+    """Runs the exact inbox delivery flow for user `uid`. Returns (delivered_to_dm, status_code)."""
+    params = {"uid": uid, "chat_type": source_chat_type, "chat_id": source_chat_id or uid}
     if video_id:
         params["video_id"] = video_id
 
@@ -93,23 +121,12 @@ async def deliver(uid: int, name: str, chat_id: int, chat_type: str, video_id: i
             ])
             if v.get("image"):
                 try:
-                    return await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=v["image"],
-                        caption=cap,
-                        reply_markup=kb,
-                        reply_to_message_id=reply_to,
-                        allow_sending_without_reply=True,
-                    )
+                    await bot.send_photo(chat_id=uid, photo=v["image"], caption=cap, reply_markup=kb)
+                    return True, "ok"
                 except TelegramBadRequest:
                     pass
-            return await bot.send_message(
-                chat_id=chat_id,
-                text=cap,
-                reply_markup=kb,
-                reply_to_message_id=reply_to,
-                allow_sending_without_reply=True,
-            )
+            await bot.send_message(chat_id=uid, text=cap, reply_markup=kb)
+            return True, "ok"
 
         err = r.get("error")
         if err == "need_tasks":
@@ -122,37 +139,71 @@ async def deliver(uid: int, name: str, chat_id: int, chat_type: str, video_id: i
             ]
             rows.append([InlineKeyboardButton(text="✅ Verify", callback_data=f"vf:{uid}:{video_id or 0}")])
             await bot.send_message(
-                chat_id=chat_id,
+                chat_id=uid,
                 text="🔒 <b>Daily free limit reached.</b>\nComplete the tasks below to earn bonus videos, then tap <b>Verify</b>.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-                reply_to_message_id=reply_to,
-                allow_sending_without_reply=True,
             )
-        elif err == "limit":
+            return True, "need_tasks"
+
+        if err == "limit":
             await bot.send_message(
-                chat_id=chat_id,
+                chat_id=uid,
                 text=f"⏳ Daily limit reached. Resets in <b>{fmt_time(r.get('reset_in', 0))}</b>.",
-                reply_to_message_id=reply_to,
-                allow_sending_without_reply=True,
             )
-        elif err == "no_user":
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Send /start to me in private chat first.",
-                reply_to_message_id=reply_to,
-                allow_sending_without_reply=True,
-            )
-        else:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=r.get("message") or "Something went wrong.",
-                reply_to_message_id=reply_to,
-                allow_sending_without_reply=True,
-            )
+            return True, "limit"
+
+        if err == "no_user":
+            return False, "no_user"
+
+        await bot.send_message(chat_id=uid, text=r.get("message") or "Something went wrong.")
+        return True, err or "error"
+
     except TelegramForbiddenError:
         await api("inactive", uid=uid)
+        return False, "blocked_or_no_dm"
     except TelegramAPIError as e:
-        logging.warning("send failed: %s", e)
+        logging.warning("send to inbox failed: %s", e)
+        return False, "tg_error"
+
+
+async def handle_group_video_request(message: Message):
+    u = message.from_user
+    if not u or u.is_bot:
+        return
+
+    await api(
+        "register",
+        id=u.id,
+        first_name=u.first_name or "",
+        last_name=u.last_name or "",
+        username=u.username or "",
+        active=0,
+    )
+
+    sent_dm, status = await deliver_to_inbox(
+        uid=u.id,
+        name=u.first_name or "User",
+        source_chat_type="group",
+        source_chat_id=message.chat.id,
+    )
+
+    link = inbox_link("video")
+    if sent_dm:
+        text = (
+            f"📩 <b>{esc(u.first_name)}</b>, check your inbox!\n"
+            f"👉 <a href=\"{link}\">Open Inbox</a>"
+        )
+    else:
+        text = (
+            f"📩 <b>{esc(u.first_name)}</b>, I couldn't message your inbox yet. "
+            f"Check your inbox and start the bot first:\n👉 <a href=\"{link}\">Open Inbox</a>"
+        )
+
+    await message.reply(
+        text,
+        reply_markup=inbox_kb("video"),
+        allow_sending_without_reply=True,
+    )
 
 
 # ---------------- Handlers ----------------
@@ -168,41 +219,93 @@ async def start_handler(message: Message):
         username=u.username or "",
         active=1 if private else 0,
     )
-    if not private:
-        return await message.reply("Use /video to get a video.")
 
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=GET_BTN)]],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder=f"Tap {GET_BTN}",
-    )
+    if not private:
+        return await message.reply(
+            f"Tap <b>{GET_BTN}</b> below to receive a video in your inbox.",
+            reply_markup=get_video_kb(),
+            allow_sending_without_reply=True,
+        )
+
     await message.reply(
         f"👋 Hi <b>{esc(u.first_name)}</b>!\nTap <b>{GET_BTN}</b> below to receive a video.",
-        reply_markup=kb,
+        reply_markup=get_video_kb(),
     )
+
+    # If user came from the group's inbox link (/start video), deliver immediately
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip() == "video":
+        await deliver_to_inbox(uid=u.id, name=u.first_name or "User", source_chat_type="private")
 
 
 @router.message(Command("video", "get"))
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == GET_BTN)
-async def video_handler(message: Message):
+async def private_video_handler(message: Message):
     u = message.from_user
-    private = message.chat.type == ChatType.PRIVATE
     await api(
         "register",
         id=u.id,
         first_name=u.first_name or "",
         last_name=u.last_name or "",
         username=u.username or "",
-        active=1 if private else 0,
+        active=1,
     )
-    await deliver(
+    sent_dm, status = await deliver_to_inbox(
         uid=u.id,
-        name=u.first_name,
-        chat_id=message.chat.id,
-        chat_type="private" if private else "group",
-        reply_to=message.message_id,
+        name=u.first_name or "User",
+        source_chat_type="private",
+        source_chat_id=message.chat.id,
     )
+    if not sent_dm and status == "no_user":
+        await message.reply("Send /start to me in private chat first.")
+
+
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text == GET_BTN)
+async def group_button_video_handler(message: Message):
+    await handle_group_video_request(message)
+
+
+@router.my_chat_member()
+async def on_my_chat_member(event: ChatMemberUpdated):
+    if event.chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+    new_status = event.new_chat_member.status
+    if new_status in {"member", "administrator"}:
+        prompted_groups.add(event.chat.id)
+        try:
+            await bot.send_message(
+                chat_id=event.chat.id,
+                text=f"🎬 Tap <b>{GET_BTN}</b> below to get a video in your inbox!",
+                reply_markup=get_video_kb(),
+            )
+        except TelegramAPIError as e:
+            logging.warning("group button attach failed on join: %s", e)
+
+
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def group_auto_attach_handler(message: Message):
+    if message.new_chat_members:
+        try:
+            await message.reply(
+                f"🎬 Tap <b>{GET_BTN}</b> below to get a video in your inbox!",
+                reply_markup=get_video_kb(),
+                allow_sending_without_reply=True,
+            )
+            prompted_groups.add(message.chat.id)
+        except TelegramAPIError:
+            pass
+        return
+
+    if message.chat.id not in prompted_groups:
+        prompted_groups.add(message.chat.id)
+        try:
+            await message.reply(
+                f"🎬 Tap <b>{GET_BTN}</b> below to get a video in your inbox!",
+                reply_markup=get_video_kb(),
+                allow_sending_without_reply=True,
+            )
+        except TelegramAPIError:
+            pass
 
 
 @router.callback_query(F.data.startswith("vf:"))
@@ -219,13 +322,11 @@ async def verify_handler(query: CallbackQuery):
             await query.message.delete()
         except TelegramAPIError:
             pass
-        ct = "private" if query.message.chat.type == ChatType.PRIVATE else "group"
-        await deliver(
+        await deliver_to_inbox(
             uid=uid,
-            name=query.from_user.first_name,
-            chat_id=query.message.chat.id,
-            chat_type=ct,
+            name=query.from_user.first_name or "User",
             video_id=vid or None,
+            source_chat_type="private",
         )
     else:
         await query.answer("❌ Not completed yet. Finish every task, then press Verify.", show_alert=True)
