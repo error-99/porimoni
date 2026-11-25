@@ -8,6 +8,7 @@ import hashlib
 import html
 import logging
 import os
+import time
 
 import httpx
 from aiohttp import web
@@ -15,7 +16,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
                            MenuButtonDefault, MenuButtonWebApp, Message, ReplyKeyboardMarkup,
                            ReplyParameters, WebAppInfo)
@@ -33,11 +34,14 @@ BASE_URL     = (os.environ.get("WEBHOOK_BASE") or os.environ.get("RENDER_EXTERNA
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:40]
 WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
 PORT         = int(os.environ.get("PORT", "8080"))
+GROUP_COOLDOWN = int(os.environ.get("GROUP_COOLDOWN", "20"))   # seconds between group replies per user
 GET_BTN      = "🎬 Get Video"                         # text of the native button
 # =====================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 router = Router()
+GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
+_last_group = {}   # user_id -> last time we replied in a group (anti-spam)
 http: httpx.AsyncClient = None
 esc = lambda s: html.escape(str(s or ""))
 
@@ -110,7 +114,7 @@ async def deliver(bot: Bot, uid: int, name: str, chat_id: int, chat_type: str,
 
 # ---------------- handlers ----------------
 @router.message(CommandStart())
-async def start(m: Message):
+async def start(m: Message, command: CommandObject, bot: Bot):
     u = m.from_user
     private = m.chat.type == ChatType.PRIVATE
     await register(u, private)
@@ -119,16 +123,34 @@ async def start(m: Message):
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=GET_BTN)]], resize_keyboard=True,
                              is_persistent=True, input_field_placeholder="Tap 🎬 Get Video")
     await m.answer(f"👋 Hi <b>{esc(u.first_name)}</b>!\nTap <b>{GET_BTN}</b> below to receive a video.", reply_markup=kb)
+    if command.args == "get":                      # came from the group's "Open inbox" button
+        await deliver(bot, u.id, u.first_name, m.chat.id, "private")
 
 
-@router.message(Command("video", "get"))
+@router.message(Command("video", "get"), F.chat.type == ChatType.PRIVATE)
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == GET_BTN)
-async def get_video(m: Message, bot: Bot):
+async def get_video_private(m: Message, bot: Bot):
     u = m.from_user
-    private = m.chat.type == ChatType.PRIVATE
-    await register(u, private)
-    await deliver(bot, u.id, u.first_name, m.chat.id, "private" if private else "group",
-                  reply_to=None if private else m.message_id)
+    await register(u, True)
+    await deliver(bot, u.id, u.first_name, m.chat.id, "private")
+
+
+@router.message(Command("video", "get"), F.chat.type.in_(GROUPS))
+@router.message(F.chat.type.in_(GROUPS), F.text == GET_BTN)
+async def get_video_group(m: Message):
+    """In a group: register the user, then point them to the bot inbox (video is sent privately)."""
+    u = m.from_user
+    if not u or u.is_bot:
+        return
+    await register(u, False)
+    now = time.time()
+    if now - _last_group.get(u.id, 0) < GROUP_COOLDOWN:      # silent anti-spam
+        return
+    _last_group[u.id] = now
+    if len(_last_group) > 5000:
+        _last_group.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Open inbox", url=f"https://t.me/{BOT_USERNAME}?start=get")]])
+    await m.reply(f"✅ <b>{esc(u.first_name)}</b>, you are registered.\nTap <b>Open inbox</b> to get your video 👇", reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("vf:"))
