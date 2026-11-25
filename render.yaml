@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: video-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_URL
+        value: https://shabbir.serv00.net/sex/vid65/api/user_tasks.php
+      - key: API_KEY
+        sync: false
+      - key: BOT_USERNAME
+        value: fuclcrobot
+      - key: APP_SHORT
+        value: app
+      - key: WEBAPP_URL
+        sync: false
+      - key: SHOW_MENU_BUTTON
+        value: "1"
